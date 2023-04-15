@@ -782,42 +782,95 @@ class CheckoutController
 
 	
 	
+     /**
+     * Handle the Tranzila webhook.
+     *
+     * @param Request $request
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function tranzila(Request $request)
+    {
+        // Retrieve the payload data
+        $payload = json_decode($request->getContent());
 
-   /*** Initialize the Tranzila payment.*/
-	
+        if ($payload && isset($payload->Response) && $payload->Response == "000") {
+            // payment was successful
+            // perform necessary actions
+            if (isset($payload->Metadata)) {
+                $metadata = json_decode($payload->Metadata);
 
+                if (isset($metadata->user)) {
+                    $user = User::where('id', '=', $metadata->user)->first();
 
+                    // If a user was found
+                    if ($user) {
+                        // If the payment does not exist
+                        if (!Payment::where([['processor', '=', 'tranzila'], ['payment_id', '=', $payload->TransactionId]])->exists()) {
+                            $now = Carbon::now();
 
+                            // If the user previously had a subscription, attempt to cancel it
+                            if ($user->plan_subscription_id) {
+                                $user->planSubscriptionCancel();
+                            }
 
+                            $user->plan_id = $metadata->plan;
+                            $user->plan_amount = $metadata->amount;
+                            $user->plan_currency = $metadata->currency;
+                            $user->plan_interval = $metadata->interval;
+                            $user->plan_payment_processor = 'tranzila';
+                            $user->plan_subscription_id = $payload->TransactionId;
+                            $user->plan_subscription_status = null;
+                            $user->plan_created_at = $now;
+                            $user->plan_recurring_at = null;
+                            $user->plan_ends_at = $metadata->interval == 'month' ? (clone $now)->addMonth() : (clone $now)->addYear();
+                            $user->save();
 
-        
-	
-	
-	private function initTranzila(Request $request, Plan $plan, $coupon, $taxRates, $amount) {
-    $tranzilaUrl = "https://direct.tranzila.com/lashes/iframenew.php"; // замените YOUR_LOGIN на свой логин в Tranzila
-    $tranzilaPw = "YOUR_PASSWORD"; // замените YOUR_PASSWORD на свой пароль в Tranzila
+                            // If a coupon was used
+                            if (isset($metadata->coupon) && $metadata->coupon) {
+                                $coupon = Coupon::find($metadata->coupon);
 
-    if ($request->input('interval') == 'year') {
-        // годовой платеж
-        $amount = $plan->amount_year;
-    } else {
-        // месячный платеж
-        $amount = $plan->amount_month;
+                                // If a coupon was found
+                                if ($coupon) {
+                                    // Increase the coupon usage
+                                    $coupon->increment('redeems', 1);
+                                }
+                            }
+
+                            $payment = $this->paymentStore([
+                                'user_id' => $user->id,
+                                'plan_id' => $metadata->plan,
+                                'payment_id' => $payload->TransactionId,
+                                'processor' => 'tranzila',
+                                'amount' => $metadata->amount,
+                                'currency' => $metadata->currency,
+                                'interval' => $metadata->interval,
+                                'status' => 'completed',
+                                'coupon' => $metadata->coupon ?? null,
+                                'tax_rates' => $metadata->tax_rates ?? null,
+                                'customer' => $user->billing_information,
+                            ]);
+
+                            // Attempt to send the payment confirmation email
+                            try {
+                                Mail::to($user->email)->locale($user->locale)->send(new PaymentMail($payment));
+                            } catch (\Exception $e) {
+                                // Log any errors
+                                Log::error($e->getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+        } elseif ($payload && isset($payload->Response) && $payload->Response == "004") {
+            // payment was cancelled
+            // perform necessary actions
+        } else {
+            // payment failed for another reason
+            // perform necessary actions
+        }
+
+        return response('OK', 200);
     }
-
-    $sum = formatMoney($amount, $plan->currency);
-
-    if ($request->input('interval') == 'year') {
-        $npay = 7;
-    } elseif ($request->input('interval') == 'month') {
-        $npay = 4;
-    }
-
-        $url = "{$tranzilaUrl}?lang=il&&sum={$sum}&currency=1&recur_transaction={$npay}_approved&ResponseURL={$request->getSchemeAndHttpHost()}{$request->getBaseUrl()}/checkout/tranzila&ResponseURLF={$request->getSchemeAndHttpHost()}{$request->getBaseUrl()}/checkout/tranzila";
-
-    return view('checkout.tranzila', compact('url'));
-}
-
 
         
 
